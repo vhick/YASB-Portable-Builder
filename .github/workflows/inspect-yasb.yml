@@ -1,0 +1,80 @@
+name: Inspect YASB for Portability
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_repo:
+        description: Source repository (leave blank for YOUR-USERNAME/yasb)
+        required: false
+        default: ""
+
+      upstream_ref:
+        description: Source branch/tag/SHA
+        required: false
+        default: "main"
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    name: YASB Source Inspection
+    runs-on: windows-2022
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout builder repository
+        uses: actions/checkout@v7
+
+      - name: Resolve source repository
+        id: source
+        shell: pwsh
+        run: |
+          $repo = "${{ inputs.upstream_repo }}"
+
+          if ([string]::IsNullOrWhiteSpace($repo)) {
+            $repo = "${{ github.repository_owner }}/yasb"
+          }
+
+          $ref = "${{ inputs.upstream_ref }}"
+
+          if ([string]::IsNullOrWhiteSpace($ref)) {
+            $ref = "main"
+          }
+
+          "repo=$repo" >> $env:GITHUB_OUTPUT
+          "ref=$ref" >> $env:GITHUB_OUTPUT
+
+          Write-Host "Source repository: $repo"
+          Write-Host "Source ref:        $ref"
+
+      - name: Checkout synced YASB fork
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ steps.source.outputs.repo }}
+          ref: ${{ steps.source.outputs.ref }}
+          path: upstream
+          fetch-depth: 1
+
+      - name: Record source revision
+        id: revision
+        shell: pwsh
+        run: |
+          $rev = (git -C upstream rev-parse HEAD).Trim()
+          "sha=$rev" >> $env:GITHUB_OUTPUT
+          Write-Host "Source revision: $rev"
+
+      - name: Inspect YASB paths, caches, startup, updater, and packaging
+        shell: pwsh
+        run: |
+          & .\scripts\Inspect-YASB-Portability.ps1 `
+            -SourceRoot "$PWD\upstream" `
+            -OutputRoot "$PWD\artifact\YASB-Inspection"
+
+      - name: Upload inspection artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: YASB-Portable-Inspection-${{ steps.revision.outputs.sha }}
+          path: artifact/YASB-Inspection/**
+          if-no-files-found: error
+          retention-days: 30
