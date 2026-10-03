@@ -48,17 +48,20 @@ if ($failed.Count -gt 0) {
     throw "Portable source verification failed."
 }
 
-# Fail closed if an application-owned YASB LocalAppData path remains in these
-# two central persistence modules.
-foreach ($pair in @(
-    @{ Name="system.py"; Text=$system },
-    @{ Name="cloud/session.py"; Text=$cloud }
-)) {
-    if ($pair.Text -match 'LOCALAPPDATA.+["'']YASB["'']' -or
-        $pair.Text -match 'LOCALAPPDATA.+/ "YASB"' -or
-        $pair.Text -match '%LOCALAPPDATA%\\YASB') {
-        throw "Host LocalAppData YASB persistence remains in $($pair.Name)."
-    }
+# Source/development mode intentionally retains upstream LOCALAPPDATA behavior
+# inside app_data_path(). The portable requirement is that the FROZEN branch
+# resolves beside sys.executable and that Cloud no longer bypasses app_data_path.
+if (-not $system.Contains('if getattr(sys, "frozen", False):')) {
+    throw "Portable frozen-mode branch is missing from app_data_path()."
+}
+
+if (-not $system.Contains('folder = Path(sys.executable).resolve().parent / "Data" / "LocalState"')) {
+    throw "Frozen app_data_path() does not resolve to Data\LocalState."
+}
+
+if ($cloud.Contains('os.environ.get("LOCALAPPDATA"') -or
+    $cloud.Contains('%LOCALAPPDATA%\\YASB\\cloud')) {
+    throw "YASB Cloud still contains a direct host LocalAppData persistence path."
 }
 
 # Keep upstream DPAPI protection. This is intentional and must not silently

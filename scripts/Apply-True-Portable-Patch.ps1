@@ -177,7 +177,7 @@ $cloudSession = Replace-Exact `
 
 $oldCloudDir = @'
 def cloud_dir() -> Path:
-    """`%LOCALAPPDATA%\YASB\cloud`, created on demand."""
+    """`%LOCALAPPDATA%\\YASB\\cloud`, created on demand."""
     base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "YASB" / CLOUD_DIR_NAME
     base.mkdir(parents=True, exist_ok=True)
     return base
