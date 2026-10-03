@@ -1,0 +1,157 @@
+name: Build YASB Portable
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: What should the builder do?
+        required: true
+        default: portable-data
+        type: choice
+        options:
+          - portable-data
+          - inspect-source
+
+      upstream_repo:
+        description: Source repository (leave blank for YOUR-USERNAME/yasb)
+        required: false
+        default: ""
+
+      upstream_ref:
+        description: Source branch/tag/SHA
+        required: false
+        default: "main"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: yasb-portable-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: YASB Portable
+    runs-on: windows-2022
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout portable-builder repository
+        uses: actions/checkout@v7
+
+      - name: Resolve source repository
+        id: source
+        shell: pwsh
+        run: |
+          $repo = "${{ inputs.upstream_repo }}"
+
+          if ([string]::IsNullOrWhiteSpace($repo)) {
+            $repo = "${{ github.repository_owner }}/yasb"
+          }
+
+          $ref = "${{ inputs.upstream_ref }}"
+
+          if ([string]::IsNullOrWhiteSpace($ref)) {
+            $ref = "main"
+          }
+
+          "repo=$repo" >> $env:GITHUB_OUTPUT
+          "ref=$ref" >> $env:GITHUB_OUTPUT
+
+          Write-Host "Source repository: $repo"
+          Write-Host "Source ref:        $ref"
+
+      - name: Checkout synced YASB fork
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ steps.source.outputs.repo }}
+          ref: ${{ steps.source.outputs.ref }}
+          path: upstream
+          fetch-depth: 1
+
+      - name: Record source revision
+        id: revision
+        shell: pwsh
+        run: |
+          $rev = (git -C upstream rev-parse HEAD).Trim()
+          "sha=$rev" >> $env:GITHUB_OUTPUT
+          Write-Host "Source revision: $rev"
+
+      - name: Inspect current YASB source
+        if: ${{ inputs.mode == 'inspect-source' }}
+        shell: pwsh
+        run: |
+          & .\scripts\Inspect-YASB-Portability.ps1 `
+            -SourceRoot "$PWD\upstream" `
+            -OutputRoot "$PWD\artifact\YASB-Inspection"
+
+      - name: Upload source inspection
+        if: ${{ inputs.mode == 'inspect-source' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: YASB-Portable-Inspection-${{ steps.revision.outputs.sha }}
+          path: artifact/YASB-Inspection/**
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Setup Python 3.14
+        if: ${{ inputs.mode == 'portable-data' }}
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+          cache: pip
+          cache-dependency-path: upstream/pyproject.toml
+
+      - name: Install YASB packaging dependencies
+        if: ${{ inputs.mode == 'portable-data' }}
+        working-directory: upstream
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[packaging]"
+
+      - name: Apply true-portable source patch
+        if: ${{ inputs.mode == 'portable-data' }}
+        shell: pwsh
+        run: |
+          & .\scripts\Apply-True-Portable-Patch.ps1 `
+            -SourceRoot "$PWD\upstream"
+
+      - name: Verify patched source
+        if: ${{ inputs.mode == 'portable-data' }}
+        shell: pwsh
+        run: |
+          & .\scripts\Verify-Portable-Source.ps1 `
+            -SourceRoot "$PWD\upstream"
+
+      - name: Compile patched Python source
+        if: ${{ inputs.mode == 'portable-data' }}
+        working-directory: upstream
+        shell: pwsh
+        run: |
+          python -m compileall -q src
+
+      - name: Build raw cx_Freeze application folder
+        if: ${{ inputs.mode == 'portable-data' }}
+        working-directory: upstream/src
+        shell: pwsh
+        run: |
+          python build.py build
+
+      - name: Assemble portable package
+        if: ${{ inputs.mode == 'portable-data' }}
+        shell: pwsh
+        run: |
+          & .\scripts\Assemble-Portable.ps1 `
+            -SourceRoot "$PWD\upstream" `
+            -OutputRoot "$PWD\artifact\YASB-Portable" `
+            -KitRoot "$PWD"
+
+      - name: Upload portable build
+        if: ${{ inputs.mode == 'portable-data' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: YASB-Portable-Windows-x64-${{ steps.revision.outputs.sha }}
+          path: artifact/YASB-Portable/**
+          if-no-files-found: error
+          retention-days: 30
