@@ -1,47 +1,46 @@
-# YASB Portable Builder — Inspection Edition
+# YASB True-Portable Builder
 
-This repository is the **inspection stage** for making YASB truly portable.
+This repository builds the raw **cx_Freeze** YASB application folder on a GitHub-hosted Windows runner. It deliberately does **not** build or install the MSI.
 
-It does **not** compile or modify YASB yet.
+## Normal build
 
-## Why inspect first?
+**Actions → Build YASB Portable → Run workflow → `portable-data`**
 
-YASB already supports `YASB_CONFIG_HOME`, so its main configuration can be moved away from the normal user profile.
+The portable source patch redirects YASB-owned state to:
 
-However, current YASB behavior/documentation also uses `%LOCALAPPDATA%\YASB` for runtime state such as systray state and some token/cache files.
+- `Data\Config` — `config.yaml`, `styles.css`, `.env`, `yasb.log`, generated colors, dumps folder path
+- `Data\LocalState` — systray state, update timestamp, GitHub OAuth tokens, quick-launch state, Open-Meteo location, widget caches, taskbar state, thumbnails, Cloud files, etc.
+- `Data\Temp` — YASB-owned `tempfile` caches such as quick-launch icon caches
 
-Before writing a source patch, the inspection finds every important path writer in the exact current upstream revision.
+The builder also disables:
 
-## Clean fork
+- official MSI self-update/channel switching;
+- registry/Task-Scheduler YASB autostart;
+- WER crash-dump registry setup;
+- YASB Cloud automatic-backup Scheduled Task creation.
 
-Create a clean fork named exactly:
+Use the packaged `INSTALL-PORTABLE-STARTUP.cmd` instead.
 
-`yasb`
+## YASB Cloud security limitation
 
-from:
+YASB Cloud `session.bin` and `vault.bin` still use upstream Windows DPAPI. Their files move with `Data\LocalState\cloud`, but the cached sign-in is intentionally bound to the Windows user/machine. After a clean Windows installation or on another Windows account, sign in to YASB Cloud again.
 
-`amnweb/yasb`
+This preserves upstream credential security instead of weakening it merely to make the login token portable.
 
-Do not put portable changes in that fork.
+## Deliberate Windows interactions that remain
 
-Your Universal Fork Sync already discovers all forks in your account, so it will keep the fork synchronized automatically.
+Some YASB features intentionally interact with Windows:
 
-## Builder repository
+- the first-run wizard can install fonts;
+- Control Center can change Windows theme settings;
+- widgets read state from other applications such as browsers, VS Code and Windows Terminal.
 
-Create a normal repository named exactly:
+Those are application features/system dependencies, not YASB's own persistent configuration.
 
-`YASB-Portable-Builder`
+## Diagnostic mode
 
-Upload this inspection builder there.
+If a future upstream update breaks the patch, run:
 
-## Run
+`inspect-source`
 
-Actions → Inspect YASB for Portability → Run workflow
-
-When it succeeds, download:
-
-`YASB-Portable-Inspection-<commit>`
-
-Upload that artifact to ChatGPT.
-
-The final builder will then replace this temporary inspection edition.
+and send the resulting `YASB-Portable-Inspection-<commit>` artifact to ChatGPT.
