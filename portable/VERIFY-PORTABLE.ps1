@@ -1,4 +1,4 @@
-﻿$ErrorActionPreference = "Continue"
+$ErrorActionPreference = "Continue"
 
 $root = $PSScriptRoot
 $reportDir = Join-Path $root "Verification"
@@ -9,96 +9,86 @@ function W([string]$Text="") {
     Add-Content -LiteralPath $report -Value $Text -Encoding UTF8
 }
 
-W "YASB TRUE-PORTABLE VERIFICATION"
+W "YASB TRUE-PORTABLE + KOMOREBI INTEGRATION VERIFICATION"
 W ("Generated: {0}" -f (Get-Date))
-W ("Portable folder: {0}" -f $root)
+W ("YASB root: {0}" -f $root)
 W ""
 
-foreach ($p in @(
+foreach ($relative in @(
     "yasb.exe",
-    "yasbc.exe",
-    "yasb_themes.exe",
-    "yasb_cloud.exe",
     "Data\Config",
     "Data\LocalState",
     "Data\Temp"
 )) {
-    $full = Join-Path $root $p
-    W ("{0}: {1}" -f $p,(Test-Path -LiteralPath $full))
+    W ("{0}: {1}" -f $relative,(Test-Path -LiteralPath (Join-Path $root $relative)))
 }
 
-W ""
-W "=== Portable Data contents ==="
-$data = Join-Path $root "Data"
-if (Test-Path -LiteralPath $data -PathType Container) {
-    Get-ChildItem -LiteralPath $data -Force -Recurse -ErrorAction SilentlyContinue |
-        Select-Object -First 500 |
-        ForEach-Object { W $_.FullName }
+$parent = Split-Path -Parent $root
+$komRoot = if ($env:KOMOREBI_PORTABLE_HOME) {
+    $env:KOMOREBI_PORTABLE_HOME
+}
+else {
+    Join-Path $parent "Komorebi"
 }
 
-W ""
-W "=== Known old host YASB locations ==="
-$oldLocations = @(
-    (Join-Path $env:LOCALAPPDATA "YASB"),
-    (Join-Path $HOME ".config\yasb"),
-    (Join-Path ([IO.Path]::GetTempPath()) "yasb_quick_launch_icons")
-)
-
-foreach ($p in $oldLocations) {
-    W ("{0}: {1}" -f $p,(Test-Path -LiteralPath $p))
-}
+$komorebic = Join-Path $komRoot "komorebic.exe"
 
 W ""
-W "=== YASB_CONFIG_HOME environment ==="
-W ("Current process: {0}" -f $env:YASB_CONFIG_HOME)
-W ("User environment: {0}" -f [Environment]::GetEnvironmentVariable("YASB_CONFIG_HOME","User"))
+W "=== Komorebi sibling ==="
+W ("Komorebi root: {0}" -f $komRoot)
+W ("komorebic.exe exists: {0}" -f (Test-Path -LiteralPath $komorebic -PathType Leaf))
+W ("komorebi.exe running: {0}" -f (@(Get-Process -Name "komorebi" -ErrorAction SilentlyContinue).Count -gt 0))
+W ("whkd.exe running: {0}" -f (@(Get-Process -Name "whkd" -ErrorAction SilentlyContinue).Count -gt 0))
 
-W ""
-W "=== Registry autostart ==="
-$run = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-try {
-    $value = (Get-ItemProperty -Path $run -Name "YASB" -ErrorAction Stop).YASB
-    W ("HKCU Run YASB = {0}" -f $value)
-}
-catch {
-    W "HKCU Run YASB: absent"
-}
+if (Test-Path -LiteralPath $komorebic -PathType Leaf) {
+    $env:KOMOREBI_PORTABLE_HOME = $komRoot
+    $env:KOMOREBI_PORTABLE_CONFIG_HOME = Join-Path $komRoot "Data\Config"
+    $env:WHKD_PORTABLE_CONFIG_HOME = Join-Path $komRoot "Data\Config"
+    $env:KOMOREBI_DATA_HOME = Join-Path $komRoot "Data\LocalState"
+    $env:KOMOREBI_TEMP_HOME = Join-Path $komRoot "Data\Temp"
+    $env:PATH = "$komRoot;$env:PATH"
 
-W ""
-W "=== Scheduled Tasks ==="
-foreach ($name in @("YASB Reborn","YASB Cloud Automatic Backup")) {
+    W ""
+    W "=== komorebic data-directory ==="
     try {
-        $task = Get-ScheduledTask -TaskName $name -ErrorAction Stop
-        W ("{0}: PRESENT" -f $name)
+        & $komorebic data-directory 2>&1 | ForEach-Object { W ([string]$_) }
     }
     catch {
-        W ("{0}: absent" -f $name)
+        W ("ERROR: {0}" -f $_.Exception.Message)
     }
 }
 
 W ""
-W "=== WER LocalDumps ==="
-$wer = "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\yasb.exe"
-W ("{0}: {1}" -f $wer,(Test-Path $wer))
+W "=== YASB Komorebi log evidence ==="
+$yasbLog = Join-Path $root "Data\Config\yasb.log"
 
-W ""
-W "=== Old MSI integration ==="
-foreach ($p in @(
-    "HKLM:\SOFTWARE\Classes\AppUserModelId\YASB.YetAnotherStatusBar",
-    "HKCU:\Software\Classes\AppUserModelId\YASB.YetAnotherStatusBar",
-    "HKLM:\SOFTWARE\Classes\yasb-themes",
-    "HKCU:\Software\Classes\yasb-themes"
-)) {
-    W ("{0}: {1}" -f $p,(Test-Path $p))
+if (Test-Path -LiteralPath $yasbLog -PathType Leaf) {
+    $tail = Get-Content -LiteralPath $yasbLog -Tail 500 -ErrorAction SilentlyContinue
+    $connected = @($tail | Select-String -SimpleMatch "Komorebi connected to named pipe").Count
+    $created = @($tail | Select-String -SimpleMatch "Created named pipe").Count
+    $timeouts = @($tail | Select-String -SimpleMatch "Komorebi state query timed out").Count
+    $failedSubscribe = @($tail | Select-String -SimpleMatch "Komorebi failed to subscribe named pipe").Count
+
+    W ("Created named pipe lines: {0}" -f $created)
+    W ("Komorebi connected lines: {0}" -f $connected)
+    W ("State-query timeout lines: {0}" -f $timeouts)
+    W ("Failed-subscribe lines: {0}" -f $failedSubscribe)
+
+    if ($connected -gt 0) {
+        W "PASS: YASB has logged a successful Komorebi named-pipe connection."
+    }
+    else {
+        W "NOTE: No successful connection line found in the last 500 log lines yet."
+    }
+}
+else {
+    W "YASB log not found yet."
 }
 
 W ""
-W "=== Cloud portability note ==="
-W "YASB Cloud files are stored below Data\LocalState\cloud."
-W "Upstream protects cached cloud login/session material with Windows DPAPI."
-W "Those cached credentials are intentionally machine/user-bound."
-W "After clean Windows reinstall or on another Windows account, sign in to YASB Cloud again."
-W "This does not affect Data\Config, .env, widget state, GitHub OAuth token files, caches, or normal YASB settings."
+W "=== Old Komorebi LocalAppData ==="
+$old = Join-Path $env:LOCALAPPDATA "komorebi"
+W ("{0}: {1}" -f $old,(Test-Path -LiteralPath $old))
 
 Write-Host ""
 Write-Host "Verification report:" -ForegroundColor Cyan
