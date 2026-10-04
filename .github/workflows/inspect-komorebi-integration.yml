@@ -1,0 +1,133 @@
+name: Inspect Komorebi + YASB Integration
+
+on:
+  workflow_dispatch:
+    inputs:
+      yasb_repo:
+        description: YASB fork (leave blank for YOUR-USERNAME/yasb)
+        required: false
+        default: ""
+
+      yasb_ref:
+        description: YASB branch/tag/SHA
+        required: false
+        default: "main"
+
+      komorebi_repo:
+        description: Komorebi fork (leave blank for YOUR-USERNAME/komorebi)
+        required: false
+        default: ""
+
+      komorebi_ref:
+        description: Komorebi branch/tag/SHA
+        required: false
+        default: "master"
+
+      whkd_repo:
+        description: whkd fork (leave blank for YOUR-USERNAME/whkd)
+        required: false
+        default: ""
+
+      whkd_ref:
+        description: whkd branch/tag/SHA
+        required: false
+        default: "master"
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    name: Komorebi YASB Integration Inspection
+    runs-on: windows-2022
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout YASB portable-builder repository
+        uses: actions/checkout@v7
+
+      - name: Resolve repositories
+        id: source
+        shell: pwsh
+        run: |
+          $owner = "${{ github.repository_owner }}"
+
+          $yasb = "${{ inputs.yasb_repo }}"
+          if ([string]::IsNullOrWhiteSpace($yasb)) {
+            $yasb = "$owner/yasb"
+          }
+
+          $komorebi = "${{ inputs.komorebi_repo }}"
+          if ([string]::IsNullOrWhiteSpace($komorebi)) {
+            $komorebi = "$owner/komorebi"
+          }
+
+          $whkd = "${{ inputs.whkd_repo }}"
+          if ([string]::IsNullOrWhiteSpace($whkd)) {
+            $whkd = "$owner/whkd"
+          }
+
+          "yasb=$yasb" >> $env:GITHUB_OUTPUT
+          "komorebi=$komorebi" >> $env:GITHUB_OUTPUT
+          "whkd=$whkd" >> $env:GITHUB_OUTPUT
+
+          Write-Host "YASB:     $yasb @ ${{ inputs.yasb_ref }}"
+          Write-Host "Komorebi: $komorebi @ ${{ inputs.komorebi_ref }}"
+          Write-Host "whkd:     $whkd @ ${{ inputs.whkd_ref }}"
+
+      - name: Checkout clean YASB fork
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ steps.source.outputs.yasb }}
+          ref: ${{ inputs.yasb_ref }}
+          path: yasb-source
+          fetch-depth: 1
+
+      - name: Checkout clean Komorebi fork
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ steps.source.outputs.komorebi }}
+          ref: ${{ inputs.komorebi_ref }}
+          path: komorebi-source
+          fetch-depth: 1
+
+      - name: Checkout clean whkd fork
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ steps.source.outputs.whkd }}
+          ref: ${{ inputs.whkd_ref }}
+          path: whkd-source
+          fetch-depth: 1
+
+      - name: Record source revisions
+        id: rev
+        shell: pwsh
+        run: |
+          $yasb = (git -C yasb-source rev-parse HEAD).Trim()
+          $komorebi = (git -C komorebi-source rev-parse HEAD).Trim()
+          $whkd = (git -C whkd-source rev-parse HEAD).Trim()
+
+          "yasb=$yasb" >> $env:GITHUB_OUTPUT
+          "komorebi=$komorebi" >> $env:GITHUB_OUTPUT
+          "whkd=$whkd" >> $env:GITHUB_OUTPUT
+
+          Write-Host "YASB revision:     $yasb"
+          Write-Host "Komorebi revision: $komorebi"
+          Write-Host "whkd revision:     $whkd"
+
+      - name: Inspect portable IPC and path integration
+        shell: pwsh
+        run: |
+          & .\scripts\Inspect-Komorebi-YASB-Integration.ps1 `
+            -YasbRoot "$PWD\yasb-source" `
+            -KomorebiRoot "$PWD\komorebi-source" `
+            -WhkdRoot "$PWD\whkd-source" `
+            -OutputRoot "$PWD\artifact\Komorebi-YASB-Inspection"
+
+      - name: Upload inspection artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Komorebi-YASB-Integration-Inspection-${{ steps.rev.outputs.komorebi }}
+          path: artifact/Komorebi-YASB-Inspection/**
+          if-no-files-found: error
+          retention-days: 30
