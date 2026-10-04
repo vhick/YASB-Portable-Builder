@@ -6,6 +6,20 @@
 $ErrorActionPreference = "Stop"
 $SourceRoot = [IO.Path]::GetFullPath($SourceRoot)
 
+function Normalize-Newlines {
+    param([string]$Text)
+
+    if ($null -eq $Text) {
+        return $Text
+    }
+
+    # Git can check text out with CRLF on Windows while patch templates may
+    # contain LF. Compare one canonical representation so identical source is
+    # not falsely reported as "upstream changed".
+    return $Text.Replace("`r`n","`n").Replace("`r","`n")
+}
+
+
 $settingsFile = Join-Path $SourceRoot "src\settings.py"
 $clientFile = Join-Path $SourceRoot "src\core\widgets\services\komorebi\client.py"
 
@@ -19,7 +33,7 @@ foreach ($path in @($settingsFile,$clientFile)) {
 # settings.py: locate sibling Komorebi portable folder early, before widgets.
 # This works even when yasb.exe is started directly rather than through CMD.
 # ---------------------------------------------------------------------------
-$settings = Get-Content -LiteralPath $settingsFile -Raw
+$settings = Normalize-Newlines (Get-Content -LiteralPath $settingsFile -Raw)
 
 if (-not $settings.Contains("YASB_KOMOREBI_PORTABLE_INTEGRATION_V1")) {
     $needle = 'SCRIPT_PATH = os.path.dirname(sys.executable) if IS_FROZEN else os.path.dirname(os.path.abspath(__file__))'
@@ -62,7 +76,7 @@ if IS_FROZEN:
 # client.py: use exact patched komorebic.exe when available and make the
 # initial state query less vulnerable to AV/process-start scanning latency.
 # ---------------------------------------------------------------------------
-$client = Get-Content -LiteralPath $clientFile -Raw
+$client = Normalize-Newlines (Get-Content -LiteralPath $clientFile -Raw)
 
 if (-not $client.Contains("YASB_KOMOREBI_CLIENT_PORTABLE_V1")) {
     if (-not $client.Contains("import json`nimport logging`nimport subprocess")) {
@@ -104,6 +118,9 @@ if (-not $client.Contains("YASB_KOMOREBI_CLIENT_PORTABLE_V1")) {
         self._timeout_secs = timeout_secs
         self._komorebic_path = komorebic_path or "komorebic.exe"
 '@
+
+    $oldInit = Normalize-Newlines $oldInit
+    $newInit = Normalize-Newlines $newInit
 
     if (-not $client.Contains($oldInit)) {
         throw "YASB KomorebiClient constructor changed upstream."
