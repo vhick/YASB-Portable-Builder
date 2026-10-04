@@ -44,22 +44,17 @@ jobs:
         shell: pwsh
         run: |
           $repo = "${{ inputs.upstream_repo }}"
-
           if ([string]::IsNullOrWhiteSpace($repo)) {
             $repo = "${{ github.repository_owner }}/yasb"
           }
 
           $ref = "${{ inputs.upstream_ref }}"
-
           if ([string]::IsNullOrWhiteSpace($ref)) {
             $ref = "main"
           }
 
           "repo=$repo" >> $env:GITHUB_OUTPUT
           "ref=$ref" >> $env:GITHUB_OUTPUT
-
-          Write-Host "Source repository: $repo"
-          Write-Host "Source ref:        $ref"
 
       - name: Checkout synced YASB fork
         uses: actions/checkout@v7
@@ -75,7 +70,7 @@ jobs:
         run: |
           $rev = (git -C upstream rev-parse HEAD).Trim()
           "sha=$rev" >> $env:GITHUB_OUTPUT
-          Write-Host "Source revision: $rev"
+          Write-Host "YASB revision: $rev"
 
       - name: Inspect current YASB source
         if: ${{ inputs.mode == 'inspect-source' }}
@@ -110,18 +105,32 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[packaging]"
 
-      - name: Apply true-portable source patch
+      - name: Apply existing true-portable source patch
         if: ${{ inputs.mode == 'portable-data' }}
         shell: pwsh
         run: |
           & .\scripts\Apply-True-Portable-Patch.ps1 `
             -SourceRoot "$PWD\upstream"
 
-      - name: Verify patched source
+      - name: Apply Komorebi portable integration patch
+        if: ${{ inputs.mode == 'portable-data' }}
+        shell: pwsh
+        run: |
+          & .\scripts\Apply-Komorebi-Integration-Patch.ps1 `
+            -SourceRoot "$PWD\upstream"
+
+      - name: Verify existing YASB portable source
         if: ${{ inputs.mode == 'portable-data' }}
         shell: pwsh
         run: |
           & .\scripts\Verify-Portable-Source.ps1 `
+            -SourceRoot "$PWD\upstream"
+
+      - name: Verify Komorebi integration source
+        if: ${{ inputs.mode == 'portable-data' }}
+        shell: pwsh
+        run: |
+          & .\scripts\Verify-Komorebi-Integration.ps1 `
             -SourceRoot "$PWD\upstream"
 
       - name: Compile patched Python source
