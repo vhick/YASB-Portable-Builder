@@ -6,64 +6,45 @@
 $ErrorActionPreference = "Stop"
 $SourceRoot = [IO.Path]::GetFullPath($SourceRoot)
 
-$settingsFile = Join-Path $SourceRoot "src\settings.py"
-$systemFile = Join-Path $SourceRoot "src\core\utils\system.py"
-$cloudSessionFile = Join-Path $SourceRoot "src\core\cloud\session.py"
-$cloudScheduleFile = Join-Path $SourceRoot "src\core\cloud\schedule.py"
-$trayFile = Join-Path $SourceRoot "src\core\tray.py"
-$updateFile = Join-Path $SourceRoot "src\core\utils\update_service.py"
-$win32UtilsFile = Join-Path $SourceRoot "src\core\utils\win32\utils.py"
-$cliFile = Join-Path $SourceRoot "src\cli.py"
-
-foreach ($path in @(
-    $settingsFile,
-    $systemFile,
-    $cloudSessionFile,
-    $cloudScheduleFile,
-    $trayFile,
-    $updateFile,
-    $win32UtilsFile,
-    $cliFile
-)) {
-    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-        throw "Expected upstream source file was not found: $path"
-    }
-}
-
 function Replace-Exact {
     param(
         [string]$Text,
         [string]$Old,
         [string]$New,
-        [string]$Label
+        [string]$Label,
+        [string]$AlternativeOld = ""
     )
 
     if ($Text.Contains($New)) {
-        Write-Host "$Label already patched." -ForegroundColor DarkGray
+        Write-Host "Already patched: $Label" -ForegroundColor DarkGray
         return $Text
     }
 
+    $matched = $Old
     if (-not $Text.Contains($Old)) {
-        throw "Could not apply '$Label': upstream source no longer matches the inspected revision. The build is stopping rather than silently losing portability."
+        if (-not [string]::IsNullOrEmpty($AlternativeOld) -and $Text.Contains($AlternativeOld)) {
+            $matched = $AlternativeOld
+        }
+        else {
+            throw "Could not apply '$Label': upstream source changed. The portable build stopped deliberately. Run inspect-source."
+        }
     }
 
+    # .NET string.Replace is literal, avoiding accidental regex changes.
     Write-Host "Applying: $Label" -ForegroundColor Cyan
-    return $Text.Replace($Old,$New)
+    return $Text.Replace($matched, $New)
 }
 
-# ----------------------------------------------------------------------
-# 1. Portable config + YASB-owned TEMP.
-#
-# Frozen YASB ignores any old host YASB_CONFIG_HOME and always resolves
-# Data beside yasb.exe. Development/source mode retains upstream behavior.
-# ----------------------------------------------------------------------
-$settings = Get-Content -LiteralPath $settingsFile -Raw
+# Keep a list of pending modifications in memory. Only write once all anchors passed.
+$pending = @{}
 
-$oldScriptPath = @'
+$file = Join-Path $SourceRoot "src\settings.py"
+if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Expected source file missing: $file" }
+$content = (Get-Content -LiteralPath $file -Raw).Replace("`r`n", "`n")
+$old = @'
 SCRIPT_PATH = os.path.dirname(sys.executable) if IS_FROZEN else os.path.dirname(os.path.abspath(__file__))
 '@
-
-$newScriptPath = @'
+$new = @'
 SCRIPT_PATH = os.path.dirname(sys.executable) if IS_FROZEN else os.path.dirname(os.path.abspath(__file__))
 
 # YASB_PORTABLE_PATHS_V1
@@ -74,47 +55,26 @@ PORTABLE_TEMP_DIRECTORY = os.path.join(PORTABLE_DATA_DIRECTORY, "Temp")
 if IS_FROZEN:
     os.makedirs(PORTABLE_CONFIG_DIRECTORY, exist_ok=True)
     os.makedirs(PORTABLE_TEMP_DIRECTORY, exist_ok=True)
-
-    # Make child YASB processes inherit the portable locations too.
     os.environ["YASB_CONFIG_HOME"] = PORTABLE_CONFIG_DIRECTORY
     os.environ["TEMP"] = PORTABLE_TEMP_DIRECTORY
     os.environ["TMP"] = PORTABLE_TEMP_DIRECTORY
-
-    # tempfile caches its selected directory. Set it explicitly so YASB-owned
-    # quick-launch icon caches and other temporary files stay beside the app.
     import tempfile
-
     tempfile.tempdir = PORTABLE_TEMP_DIRECTORY
 '@
+$content = Replace-Exact -Text $content -Label "portable config and temp root" -Old $old -New $new
+$old = @'
+DEFAULT_CONFIG_DIRECTORY = os.getenv("YASB_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config", "yasb")
+'@
+$new = @'
+DEFAULT_CONFIG_DIRECTORY = PORTABLE_CONFIG_DIRECTORY if IS_FROZEN else (os.getenv("YASB_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config", "yasb"))
+'@
+$content = Replace-Exact -Text $content -Label "frozen config directory" -Old $old -New $new
+$pending[$file] = $content
 
-$settings = Replace-Exact `
-    -Text $settings `
-    -Old $oldScriptPath `
-    -New $newScriptPath `
-    -Label "portable config/temp root"
-
-$oldConfig = 'DEFAULT_CONFIG_DIRECTORY = os.getenv("YASB_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config", "yasb")'
-$newConfig = 'DEFAULT_CONFIG_DIRECTORY = PORTABLE_CONFIG_DIRECTORY if IS_FROZEN else (os.getenv("YASB_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config", "yasb"))'
-
-$settings = Replace-Exact `
-    -Text $settings `
-    -Old $oldConfig `
-    -New $newConfig `
-    -Label "force frozen config into Data\Config"
-
-Set-Content -LiteralPath $settingsFile -Value $settings -Encoding UTF8
-
-# ----------------------------------------------------------------------
-# 2. Central YASB local-state helper.
-#
-# This catches systray_state_*.json, update timestamps, OAuth token files,
-# Open-Meteo location, quick-launch state/caches, taskbar pins/icons,
-# Claude/Codex usage caches, wallpaper thumbnails, Cava config, traffic,
-# and any future code using app_data_path().
-# ----------------------------------------------------------------------
-$system = Get-Content -LiteralPath $systemFile -Raw
-
-$oldAppData = @'
+$file = Join-Path $SourceRoot "src\core\utils\system.py"
+if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Expected source file missing: $file" }
+$content = (Get-Content -LiteralPath $file -Raw).Replace("`r`n", "`n")
+$old = @'
 def app_data_path(filename: str = None) -> Path:
     """
     Get the YASB local data folder (creating it if it doesn't exist),
@@ -126,86 +86,64 @@ def app_data_path(filename: str = None) -> Path:
         return folder / filename
     return folder
 '@
-
-$newAppData = @'
-def app_data_path(filename: str = None) -> Path:
-    """
-    Get YASB's application-owned local-state directory.
-
-    Frozen portable builds store it beside yasb.exe. Source/development runs
-    retain the upstream %LOCALAPPDATA%\YASB behavior.
-    """
+$new = @'
+def app_data_path(filename: str | None = None) -> Path:
+    """Return YASB-owned local state beside the frozen portable executable."""
     if getattr(sys, "frozen", False):
         folder = Path(sys.executable).resolve().parent / "Data" / "LocalState"
     else:
         folder = Path(os.environ["LOCALAPPDATA"]) / "YASB"
 
     folder.mkdir(parents=True, exist_ok=True)
-
     if filename is not None:
         return folder / filename
-
     return folder
 '@
+$alternative = @'
+def app_data_path(filename: str | None = None) -> Path:
+    """
+    Get the YASB local data folder (creating it if it doesn't exist),
+    or a file path inside it if filename is provided.
+    """
+    folder = Path(os.environ["LOCALAPPDATA"]) / "YASB"
+    folder.mkdir(parents=True, exist_ok=True)
+    if filename is not None:
+        return folder / filename
+    return folder
+'@
+$content = Replace-Exact -Text $content -Label "portable LocalAppData" -Old $old -New $new -AlternativeOld $alternative
+$pending[$file] = $content
 
-$system = Replace-Exact `
-    -Text $system `
-    -Old $oldAppData `
-    -New $newAppData `
-    -Label "redirect app_data_path to Data\LocalState"
-
-Set-Content -LiteralPath $systemFile -Value $system -Encoding UTF8
-
-# ----------------------------------------------------------------------
-# 3. YASB Cloud directory.
-#
-# Upstream bypasses app_data_path and directly uses %LOCALAPPDATA%\YASB\cloud.
-# Redirect its files to the same portable LocalState tree.
-#
-# NOTE: Cloud session.bin/vault.bin remain protected by Windows DPAPI.
-# Their FILES are portable, but the cached cloud sign-in cannot decrypt after
-# a Windows reinstall/different account. That security protection is kept
-# intentionally rather than weakening it.
-# ----------------------------------------------------------------------
-$cloudSession = Get-Content -LiteralPath $cloudSessionFile -Raw
-
-$cloudSession = Replace-Exact `
-    -Text $cloudSession `
-    -Old 'from core.cloud.errors import CloudError' `
-    -New "from core.cloud.errors import CloudError`nfrom core.utils.system import app_data_path" `
-    -Label "import portable local-state helper in cloud session"
-
-$oldCloudDir = @'
+$file = Join-Path $SourceRoot "src\core\cloud\session.py"
+if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Expected source file missing: $file" }
+$content = (Get-Content -LiteralPath $file -Raw).Replace("`r`n", "`n")
+$old = @'
+from core.cloud.errors import CloudError
+'@
+$new = @'
+from core.cloud.errors import CloudError
+from core.utils.system import app_data_path
+'@
+$content = Replace-Exact -Text $content -Label "import state-path helper" -Old $old -New $new
+$old = @'
 def cloud_dir() -> Path:
     """`%LOCALAPPDATA%\\YASB\\cloud`, created on demand."""
     base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "YASB" / CLOUD_DIR_NAME
     base.mkdir(parents=True, exist_ok=True)
     return base
 '@
-
-$newCloudDir = @'
+$new = @'
 def cloud_dir() -> Path:
-    """YASB Cloud state below the portable application local-state directory."""
+    """YASB Cloud files use the same portable local-state directory."""
     return app_data_path(CLOUD_DIR_NAME)
 '@
+$content = Replace-Exact -Text $content -Label "cloud state path" -Old $old -New $new
+$pending[$file] = $content
 
-$cloudSession = Replace-Exact `
-    -Text $cloudSession `
-    -Old $oldCloudDir `
-    -New $newCloudDir `
-    -Label "redirect YASB Cloud files"
-
-Set-Content -LiteralPath $cloudSessionFile -Value $cloudSession -Encoding UTF8
-
-# ----------------------------------------------------------------------
-# 4. Disable automatic installer updates in the portable fork.
-#
-# GitHub Actions is the update mechanism. This avoids an official MSI replacing
-# the patched executable set.
-# ----------------------------------------------------------------------
-$updateService = Get-Content -LiteralPath $updateFile -Raw
-
-$oldUpdateSupport = @'
+$file = Join-Path $SourceRoot "src\core\utils\update_service.py"
+if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Expected source file missing: $file" }
+$content = (Get-Content -LiteralPath $file -Raw).Replace("`r`n", "`n")
+$old = @'
     def is_update_supported(self) -> bool:
         """Check if updates are supported on this system.
 
@@ -227,38 +165,30 @@ $oldUpdateSupport = @'
 
         return is_installed and is_arch_supported and IS_FROZEN and (not is_pr_build)
 '@
-
-$newUpdateSupport = @'
+$new = @'
     def is_update_supported(self) -> bool:
-        """Portable builds are updated by the GitHub portable builder, never the MSI updater."""
+        """The portable build is updated only by its GitHub Actions builder."""
         return False
 '@
+$content = Replace-Exact -Text $content -Label "disable MSI updater" -Old $old -New $new
+$pending[$file] = $content
 
-$updateService = Replace-Exact `
-    -Text $updateService `
-    -Old $oldUpdateSupport `
-    -New $newUpdateSupport `
-    -Label "disable official MSI updater"
+$file = Join-Path $SourceRoot "src\core\tray.py"
+if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Expected source file missing: $file" }
+$content = (Get-Content -LiteralPath $file -Raw).Replace("`r`n", "`n")
+$old = @'
+AUTOSTART_FILE = EXE_PATH if os.path.exists(EXE_PATH) else None
+'@
+$new = @'
+AUTOSTART_FILE = None  # Portable build uses INSTALL-PORTABLE-STARTUP.cmd
+'@
+$content = Replace-Exact -Text $content -Label "disable tray registry startup" -Old $old -New $new
+$pending[$file] = $content
 
-Set-Content -LiteralPath $updateFile -Value $updateService -Encoding UTF8
-
-# ----------------------------------------------------------------------
-# 5. Disable YASB's registry-based autostart implementation.
-#
-# The packaged INSTALL-PORTABLE-STARTUP.cmd creates our Startup-folder
-# shortcut instead.
-# ----------------------------------------------------------------------
-$tray = Get-Content -LiteralPath $trayFile -Raw
-$tray = Replace-Exact `
-    -Text $tray `
-    -Old 'AUTOSTART_FILE = EXE_PATH if os.path.exists(EXE_PATH) else None' `
-    -New 'AUTOSTART_FILE = None  # Portable build uses INSTALL-PORTABLE-STARTUP.cmd' `
-    -Label "hide registry autostart menu in portable build"
-Set-Content -LiteralPath $trayFile -Value $tray -Encoding UTF8
-
-$win32Utils = Get-Content -LiteralPath $win32UtilsFile -Raw
-
-$oldAutostartFunctions = @'
+$file = Join-Path $SourceRoot "src\core\utils\win32\utils.py"
+if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Expected source file missing: $file" }
+$content = (Get-Content -LiteralPath $file -Raw).Replace("`r`n", "`n")
+$old = @'
 def enable_autostart(app_name: str, executable_path: str) -> bool:
     """Add application to Windows startup."""
     try:
@@ -299,17 +229,15 @@ def is_autostart_enabled(app_name: str) -> bool:
         logging.error("Failed to check startup status for %s: %s", app_name, e)
         return False
 '@
-
-$newAutostartFunctions = @'
+$new = @'
 def enable_autostart(app_name: str, executable_path: str) -> bool:
-    """Registry autostart is intentionally disabled in the portable build."""
-    logging.warning("Portable YASB uses INSTALL-PORTABLE-STARTUP.cmd instead of registry autostart.")
+    """Disable registry autostart in the portable build."""
+    logging.warning("Portable YASB uses INSTALL-PORTABLE-STARTUP.cmd, not registry autostart.")
     return False
 
 
 def disable_autostart(app_name: str) -> bool:
-    """Registry autostart is intentionally disabled in the portable build."""
-    logging.info("Portable YASB does not own a registry autostart value.")
+    """Registry autostart is not used in the portable build."""
     return True
 
 
@@ -317,22 +245,13 @@ def is_autostart_enabled(app_name: str) -> bool:
     """Registry autostart is intentionally disabled in the portable build."""
     return False
 '@
+$content = Replace-Exact -Text $content -Label "disable registry autostart" -Old $old -New $new
+$pending[$file] = $content
 
-$win32Utils = Replace-Exact `
-    -Text $win32Utils `
-    -Old $oldAutostartFunctions `
-    -New $newAutostartFunctions `
-    -Label "disable registry autostart helper functions"
-
-Set-Content -LiteralPath $win32UtilsFile -Value $win32Utils -Encoding UTF8
-
-# ----------------------------------------------------------------------
-# 6. Disable CLI actions that would install an MSI, write autostart registry/
-# Task Scheduler entries, or configure WER crash-dump registry keys.
-# ----------------------------------------------------------------------
-$cli = Get-Content -LiteralPath $cliFile -Raw
-
-$oldCliIntegration = @'
+$file = Join-Path $SourceRoot "src\cli.py"
+if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Expected source file missing: $file" }
+$content = (Get-Content -LiteralPath $file -Raw).Replace("`r`n", "`n")
+$old = @'
         elif args.command == "set-channel":
             self.channel_handler.switch_channel(args.target_channel)
             sys.exit(0)
@@ -374,8 +293,7 @@ $oldCliIntegration = @'
                 self.crash_dump_handler.disable()
             sys.exit(0)
 '@
-
-$newCliIntegration = @'
+$new = @'
         elif args.command == "set-channel":
             print("Release-channel switching is disabled in the portable build.")
             print("Use your YASB-Portable-Builder GitHub workflow to update the application.")
@@ -397,65 +315,47 @@ $newCliIntegration = @'
 
         elif args.command == "enable-crash-dumps":
             print("WER registry crash-dump registration is disabled in the portable build.")
-            print("Portable logs and normal application state remain under the Data folder.")
             sys.exit(0)
 
         elif args.command == "disable-crash-dumps":
             print("WER registry crash-dump registration is not used by the portable build.")
             sys.exit(0)
 '@
+$content = Replace-Exact -Text $content -Label "disable host integration CLI" -Old $old -New $new
+$pending[$file] = $content
 
-$cli = Replace-Exact `
-    -Text $cli `
-    -Old $oldCliIntegration `
-    -New $newCliIntegration `
-    -Label "disable CLI MSI/autostart/WER integration"
-
-Set-Content -LiteralPath $cliFile -Value $cli -Encoding UTF8
-
-# ----------------------------------------------------------------------
-# 7. YASB Cloud auto-backup normally registers its own Scheduled Task.
-# Keep manual Cloud features, but block creation of that host-persistent task.
-# ----------------------------------------------------------------------
-$cloudSchedule = Get-Content -LiteralPath $cloudScheduleFile -Raw
-
-$oldScheduleStart = @'
+$file = Join-Path $SourceRoot "src\core\cloud\schedule.py"
+if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Expected source file missing: $file" }
+$content = (Get-Content -LiteralPath $file -Raw).Replace("`r`n", "`n")
+$old = @'
 def create() -> tuple[bool, str]:
     """Register the task, replacing any existing one. Returns success and any failure text."""
     executable = _executable()
 '@
-
-$newScheduleStart = @'
+$new = @'
 def create() -> tuple[bool, str]:
-    """Portable builds do not register a host-persistent Scheduled Task."""
+    """The portable build must not register a persistent Scheduled Task."""
     return False, "Automatic YASB Cloud scheduled backup is disabled in the portable build."
 
     executable = _executable()
 '@
+$content = Replace-Exact -Text $content -Label "disable cloud scheduled task" -Old $old -New $new
+$pending[$file] = $content
 
-$cloudSchedule = Replace-Exact `
-    -Text $cloudSchedule `
-    -Old $oldScheduleStart `
-    -New $newScheduleStart `
-    -Label "disable YASB Cloud scheduled-task creation"
+foreach ($file in $pending.Keys) {
+    Set-Content -LiteralPath $file -Value $pending[$file] -Encoding UTF8
+}
 
-Set-Content -LiteralPath $cloudScheduleFile -Value $cloudSchedule -Encoding UTF8
-
-# ----------------------------------------------------------------------
-# Patch marker.
-# ----------------------------------------------------------------------
 $revision = (git -C $SourceRoot rev-parse HEAD).Trim()
-
-[ordered]@{
+$marker = [ordered]@{
     patch = "YASB true-portable"
-    patch_version = "1.0"
-    inspected_revision = "ebfc0580683d8f27abb98e87019018f0e52cc26d"
+    patch_version = "1.1"
     upstream_revision = $revision
+    inspected_revision = "7cd25351444d35111f08999f6b2b447965ce1932"
     applied_at = (Get-Date).ToString("o")
     config_root = "./Data/Config"
     local_state_root = "./Data/LocalState"
     temp_root = "./Data/Temp"
-    log_file = "./Data/Config/yasb.log"
     built_in_msi_updater = $false
     built_in_registry_autostart = $false
     built_in_task_autostart = $false
@@ -463,13 +363,9 @@ $revision = (git -C $SourceRoot rev-parse HEAD).Trim()
     cloud_scheduled_backup_task = $false
     cloud_files_portable = $true
     cloud_cached_login_machine_portable = $false
-    cloud_cached_login_note = "session.bin/vault.bin retain upstream Windows DPAPI protection and require re-authentication after Windows reinstall or on another account."
-} |
-    ConvertTo-Json -Depth 8 |
+    cloud_cached_login_note = "Windows DPAPI-protected cloud sign-in must be renewed after clean Windows install."
+}
+$marker | ConvertTo-Json -Depth 6 |
     Set-Content -LiteralPath (Join-Path $SourceRoot ".yasb-true-portable-patch.json") -Encoding UTF8
 
-Write-Host ""
-Write-Host "YASB true-portable source patch applied." -ForegroundColor Green
-Write-Host "Config:     .\Data\Config"
-Write-Host "LocalState: .\Data\LocalState"
-Write-Host "Temp:       .\Data\Temp"
+Write-Host "YASB true-portable patch v1.1 applied successfully." -ForegroundColor Green
