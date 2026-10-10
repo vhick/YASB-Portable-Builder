@@ -131,19 +131,41 @@ from core.cloud.errors import CloudError
 from core.utils.system import app_data_path
 '@
 $content = Replace-Exact -Text $content -Label "import state-path helper" -Old $old -New $new
-$old = @'
-def cloud_dir() -> Path:
-    """`%LOCALAPPDATA%\\YASB\\cloud`, created on demand."""
-    base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "YASB" / CLOUD_DIR_NAME
-    base.mkdir(parents=True, exist_ok=True)
-    return base
-'@
-$new = @'
-def cloud_dir() -> Path:
-    """YASB Cloud files use the same portable local-state directory."""
-    return app_data_path(CLOUD_DIR_NAME)
-'@
-$content = Replace-Exact -Text $content -Label "cloud state path" -Old $old -New $new
+# Match the Cloud function itself, but modify only the directory assignment.
+# This deliberately ignores comments/docstrings and newline formatting.
+# The rest of the Cloud session and DPAPI protection remain unchanged.
+$cloudFunctionPattern = '(?ms)^def cloud_dir\(\)\s*->\s*Path:\n.*?(?=^def |^class |^@|\z)'
+$cloudFunctionMatches = [regex]::Matches($content, $cloudFunctionPattern)
+if ($cloudFunctionMatches.Count -ne 1) {
+    throw "Expected exactly one cloud_dir() function, found $($cloudFunctionMatches.Count). Inspect current upstream source."
+}
+
+$cloudFunction = $cloudFunctionMatches[0].Value
+$oldCloudAssignment = '    base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "YASB" / CLOUD_DIR_NAME'
+$newCloudAssignment = '    base = app_data_path(CLOUD_DIR_NAME)'
+
+if ($cloudFunction.Contains($newCloudAssignment)) {
+    Write-Host "Already patched: cloud state path" -ForegroundColor DarkGray
+}
+else {
+    $oldCount = ([regex]::Matches($cloudFunction, [regex]::Escape($oldCloudAssignment))).Count
+    if ($oldCount -ne 1 -or
+        -not $cloudFunction.Contains('base.mkdir(parents=True, exist_ok=True)') -or
+        -not $cloudFunction.Contains('return base')) {
+        Write-Host 'Current cloud_dir() source for diagnosis:' -ForegroundColor Yellow
+        Write-Host $cloudFunction
+        throw "Cloud directory logic changed, expected one old assignment plus mkdir/return; refusing unsafe patch."
+    }
+
+    $replacement = $cloudFunction.Replace($oldCloudAssignment, $newCloudAssignment)
+    $content = $content.Remove($cloudFunctionMatches[0].Index, $cloudFunctionMatches[0].Length).Insert($cloudFunctionMatches[0].Index, $replacement)
+    Write-Host "Applying: cloud state path (single-assignment patch)" -ForegroundColor Cyan
+}
+
+# Require the imported portable helper to be present before writing any files.
+if (-not $content.Contains('from core.utils.system import app_data_path')) {
+    throw 'Cloud path helper import is missing; refusing portable build.'
+}
 $pending[$file] = $content
 
 $file = Join-Path $SourceRoot "src\core\utils\update_service.py"
@@ -355,7 +377,7 @@ foreach ($file in $pending.Keys) {
 $revision = (git -C $SourceRoot rev-parse HEAD).Trim()
 $marker = [ordered]@{
     patch = "YASB true-portable"
-    patch_version = "1.2"
+    patch_version = "1.3"
     upstream_revision = $revision
     inspected_revision = "7cd25351444d35111f08999f6b2b447965ce1932"
     applied_at = (Get-Date).ToString("o")
@@ -374,4 +396,4 @@ $marker = [ordered]@{
 $marker | ConvertTo-Json -Depth 6 |
     Set-Content -LiteralPath (Join-Path $SourceRoot ".yasb-true-portable-patch.json") -Encoding UTF8
 
-Write-Host "YASB true-portable patch v1.2 applied successfully." -ForegroundColor Green
+Write-Host "YASB true-portable patch v1.3 applied successfully." -ForegroundColor Green
