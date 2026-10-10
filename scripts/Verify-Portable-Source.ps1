@@ -30,7 +30,7 @@ $checks = [ordered]@{
     "frozen config override" = $settings.Contains('DEFAULT_CONFIG_DIRECTORY = PORTABLE_CONFIG_DIRECTORY if IS_FROZEN')
     "portable frozen state" = $system.Contains('Path(sys.executable).resolve().parent / "Data" / "LocalState"')
     "source-mode fallback only" = $system.Contains('else Path(os.environ["LOCALAPPDATA"]) / "YASB"')
-    "cloud state relocated" = $cloud.Contains('return app_data_path(CLOUD_DIR_NAME)')
+    "cloud state relocated" = $cloud.Contains('base = app_data_path(CLOUD_DIR_NAME)') -and $cloud.Contains('return base')
     "MSI updater disabled" = $update.Contains('return False') -and $update.Contains('def is_update_supported(self)')
     "tray startup hidden" = $tray.Contains('AUTOSTART_FILE = None')
     "registry startup disabled" = $win32Utils.Contains('Portable YASB uses INSTALL-PORTABLE-STARTUP.cmd')
@@ -56,4 +56,4 @@ if (-not $dpapi.Contains("CryptProtectData") -or -not $dpapi.Contains("CryptUnpr
     throw "YASB Cloud encryption changed upstream. Re-inspection required."
 }
 
-Write-Host "Portable source verification v1.2 PASSED." -ForegroundColor Green
+Write-Host "Portable source verification v1.3 PASSED." -ForegroundColor Green
