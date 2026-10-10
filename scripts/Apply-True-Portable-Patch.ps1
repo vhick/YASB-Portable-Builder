@@ -1,4 +1,4 @@
-﻿param(
+param(
     [Parameter(Mandatory=$true)]
     [string]$SourceRoot
 )
@@ -74,44 +74,50 @@ $pending[$file] = $content
 $file = Join-Path $SourceRoot "src\core\utils\system.py"
 if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Expected source file missing: $file" }
 $content = (Get-Content -LiteralPath $file -Raw).Replace("`r`n", "`n")
-$old = @'
-def app_data_path(filename: str = None) -> Path:
-    """
-    Get the YASB local data folder (creating it if it doesn't exist),
-    or a file path inside it if filename is provided.
-    """
-    folder = Path(os.environ["LOCALAPPDATA"]) / "YASB"
-    folder.mkdir(parents=True, exist_ok=True)
-    if filename is not None:
-        return folder / filename
-    return folder
-'@
-$new = @'
-def app_data_path(filename: str | None = None) -> Path:
-    """Return YASB-owned local state beside the frozen portable executable."""
-    if getattr(sys, "frozen", False):
-        folder = Path(sys.executable).resolve().parent / "Data" / "LocalState"
-    else:
-        folder = Path(os.environ["LOCALAPPDATA"]) / "YASB"
 
-    folder.mkdir(parents=True, exist_ok=True)
-    if filename is not None:
-        return folder / filename
-    return folder
+# Patch the single directory assignment INSIDE app_data_path(), rather than
+# replacing the entire function. Upstream may change type hints, docstrings,
+# or comments without changing how this function chooses its path.
+# Fail closed if its structure or storage behavior changes in a meaningful way.
+$functionPattern = '(?ms)^def app_data_path\([^\n]*\) -> Path:\n.*?(?=^def |^class |^@|\z)'
+$functionMatches = [regex]::Matches($content, $functionPattern)
+if ($functionMatches.Count -ne 1) {
+    throw "Cannot find exactly one app_data_path() function. Re-inspect upstream YASB before rebuilding."
+}
+
+$function = $functionMatches[0].Value
+$oldFolder = '    folder = Path(os.environ["LOCALAPPDATA"]) / "YASB"'
+$newFolder = @'
+    folder = (
+        Path(sys.executable).resolve().parent / "Data" / "LocalState"
+        if getattr(sys, "frozen", False)
+        else Path(os.environ["LOCALAPPDATA"]) / "YASB"
+    )
 '@
-$alternative = @'
-def app_data_path(filename: str | None = None) -> Path:
-    """
-    Get the YASB local data folder (creating it if it doesn't exist),
-    or a file path inside it if filename is provided.
-    """
-    folder = Path(os.environ["LOCALAPPDATA"]) / "YASB"
-    folder.mkdir(parents=True, exist_ok=True)
-    if filename is not None:
-        return folder / filename
-    return folder
-'@
-$content = Replace-Exact -Text $content -Label "portable LocalAppData" -Old $old -New $new -AlternativeOld $alternative
+
+if (-not $content.Contains("import sys")) {
+    throw "system.py no longer imports sys; inspect before patching its portable path."
+}
+
+if ($function.Contains($newFolder)) {
+    Write-Host "Already patched: portable LocalAppData" -ForegroundColor DarkGray
+}
+else {
+    $oldOccurrences = ([regex]::Matches($function, [regex]::Escape($oldFolder))).Count
+
+    if ($oldOccurrences -ne 1 -or
+        -not $function.Contains('folder.mkdir(parents=True, exist_ok=True)') -or
+        -not $function.Contains('if filename is not None:') -or
+        -not $function.Contains('return folder / filename') -or
+        -not $function.Contains('return folder')) {
+        throw "app_data_path() storage behavior differs from inspected source. Refusing unsafe portable patch."
+    }
+
+    $patchedFunction = $function.Replace($oldFolder, $newFolder)
+    $content = $content.Remove($functionMatches[0].Index, $functionMatches[0].Length).Insert($functionMatches[0].Index, $patchedFunction)
+    Write-Host "Applying: portable LocalAppData (single-assignment patch)" -ForegroundColor Cyan
+}
+
 $pending[$file] = $content
 
 $file = Join-Path $SourceRoot "src\core\cloud\session.py"
@@ -349,7 +355,7 @@ foreach ($file in $pending.Keys) {
 $revision = (git -C $SourceRoot rev-parse HEAD).Trim()
 $marker = [ordered]@{
     patch = "YASB true-portable"
-    patch_version = "1.1"
+    patch_version = "1.2"
     upstream_revision = $revision
     inspected_revision = "7cd25351444d35111f08999f6b2b447965ce1932"
     applied_at = (Get-Date).ToString("o")
@@ -368,4 +374,4 @@ $marker = [ordered]@{
 $marker | ConvertTo-Json -Depth 6 |
     Set-Content -LiteralPath (Join-Path $SourceRoot ".yasb-true-portable-patch.json") -Encoding UTF8
 
-Write-Host "YASB true-portable patch v1.1 applied successfully." -ForegroundColor Green
+Write-Host "YASB true-portable patch v1.2 applied successfully." -ForegroundColor Green
